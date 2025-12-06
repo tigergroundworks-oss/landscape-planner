@@ -1,4 +1,4 @@
-# app.py —— Ultimate Venue Planner v7.0（Architectural Feet 完美支持版）
+# app.py —— Ultimate Venue Planner v7.0（Architectural Feet 完美支持版 - 修复 KeyError）
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,21 +15,21 @@ st.title("Venue Layout Planner – Imperial v7.0")
 st.markdown("**All in Feet • Perfect for U.S. Architectural DXF (select Inch!) • Full DXF background**")
 
 # ==================== 单位换算（内部全部用 Feet）===================
-TO_FEET   = {"Inch (in)": 1/12, "Feet (ft)": 1.0, "Meter (m)": 3.28084}
-FROM_FEET = {"Inch (in)": 12.0,  "Feet (ft)": 1.0, "Meter (m)": 0.3048}
+TO_FEET   = {"Inch": 1/12, "Feet": 1.0, "Meter": 3.28084}
+FROM_FEET = {"Inch": 12.0,  "Feet": 1.0, "Meter": 0.3048}
 
 # ==================== 侧边栏 ====================
 st.sidebar.header("DXF Import Unit (VERY IMPORTANT)")
 import_unit = st.sidebar.selectbox(
     "Original DXF unit",
-    ["Inch (in) ← 99% U.S. Architectural DXF 必选！", "Feet (ft)", "Meter (m)"],
+    ["Inch ← 99% U.S. Architectural DXF 必选！", "Feet", "Meter"],
     index=0,
     help="美国景观/建筑DXF几乎都是 Architectural Feet（100'-0\" = 1200），必须选 Inch 才能正确显示！"
 )
 import_factor = TO_FEET[import_unit.split()[0]]
 
 st.sidebar.header("DXF Export Unit")
-export_unit = st.sidebar.selectbox("Export DXF unit", ["Feet (ft)", "Inch (in)", "Meter (m)"], index=0)
+export_unit = st.sidebar.selectbox("Export DXF unit", ["Feet", "Inch", "Meter"], index=0)
 export_factor = FROM_FEET[export_unit.split()[0]]
 
 st.sidebar.header("Site Size (Feet) – only used if no DXF")
