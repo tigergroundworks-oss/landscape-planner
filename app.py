@@ -52,134 +52,64 @@ uploaded_dxf = st.sidebar.file_uploader("上传边界DXF (可选) / Upload Bound
 
 # ==================== 读取DXF边界（支持单位换算） ====================
 boundary_polygon = [(0,0), (width,0), (width,height), (0,height), (0,0)]
+# ==================== 读取DXF边界（完美兼容Streamlit上传） ====================
+boundary_polygon = [(0,0), (width,0), (width,height), (0,height), (0,0)]
 
 if uploaded_dxf:
     try:
-        doc = ezdxf.readfile(uploaded_dxf)
+        # 关键修复：先把上传的文件保存到临时路径
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
+            tmp_file.write(uploaded_dxf.getvalue())
+            tmp_path = tmp_file.name
+        
+        # 现在用真实路径读取
+        doc = ezdxf.readfile(tmp_path)
         msp = doc.modelspace()
         points = []
-        for e in msp.query("LWPOLYLINE CIRCLE ARC LINE"):
-            if e.dxftype() == "LWPOLYLINE":
-                pts = e.get_points("xy")
-                points = [(p[0]*import_factor, p[1]*import_factor) for p in pts]
+        
+        # 优先找 LWPOLYLINE（最常用）
+        for e in msp.query("LWPOLYLINE"):
+            pts = [(p[0]*import_factor, p[1]*import_factor) for p in e.get_points("xy")]
+            if len(pts) > 2:
+                points = pts
                 break
+        
+        # 如果没找到，再尝试 POLYLINE 或其他
+        if not points:
+            for e in msp:
+                if e.dxftype() in ["POLYLINE", "LINE", "CIRCLE", "ARC"]:
+                    # 简单取包围盒作为备用
+                    bounds = e.bounds()
+                    if bounds:
+                        minx, miny, _, _ = bounds[0]
+                        maxx, maxy, _, _ = bounds[1]
+                        points = [(minx*import_factor, miny*import_factor),
+                                  (maxx*import_factor, miny*import_factor),
+                                  (maxx*import_factor, maxy*import_factor),
+                                  (minx*import_factor, maxy*import_factor)]
+                        break
+        
         if points:
-            boundary_polygon = points + [points[0]]
-            # 自动更新场地尺寸为DXF实际范围
+            boundary_polygon = points + [points[0]]  # 闭合
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
-            width = max(xs) - min(xs)
-            height = max(ys) - min(ys)
-            st.success(f"DXF导入成功！场地尺寸自动设为 {width:.1f}×{height:.1f} m")
+            new_width = max(xs) - min(xs)
+            new_height = max(ys) - min(ys)
+            if new_width > 10 and new_height > 10:  # 防止误读
+                width = new_width
+                height = new_height
+                st.success(f"DXF 导入成功！自动识别场地尺寸：{width:.1f}×{height:.1f} m")
+            else:
+                st.warning("DXF 边界太小，使用手动尺寸")
         else:
             st.warning("未识别到有效边界，使用矩形场地")
+            
     except Exception as e:
-        st.error(f"DXF读取失败: {e}")
-
-# ==================== 自定义场地管理（同上一版） ====================
-if 'custom_venues' not in st.session_state:
-    st.session_state.custom_venues = [
-        {"name": "Basketball Court", "w": 28, "h": 15, "count": 3, "color": "#1f77b4", "force_ns": True},
-        {"name": "Soccer Field",     "w": 105,"h": 68, "count": 0, "color": "#2ca02c", "force_ns": False},
-        {"name": "Badminton",        "w": 13.4,"h": 6.1,"count": 12,"color": "#d62728", "force_ns": False},
-    ]
-
-def add_venue(): 
-    st.session_state.custom_venues.append({"name":"New Space","w":30,"h":20,"count":1,"color":"#ff7f0e","force_ns":False})
-def delete_venue(i): 
-    st.session_state.custom_venues.pop(i)
-
-st.sidebar.header("Custom Venues")
-for i, v in enumerate(st.session_state.custom_venues):
-    with st.sidebar.expander(f"{v['name']} ({v['w']}×{v['h']}m) ×{v['count']}", expanded=True):
-        v["name"] = st.text_input("Name", v["name"], key=f"n{i}")
-        c1,c2 = st.columns(2)
-        v["w"] = c1.number_input("Width(m)", value=float(v["w"]), key=f"w{i}")
-        v["h"] = c2.number_input("Height(m)", value=float(v["h"]), key=f"h{i}")
-        v["count"] = st.number_input("Count", 0, 50, v["count"], key=f"c{i}")
-        v["color"] = st.color_picker("Color", v["color"], key=f"col{i}")
-        if "basketball" in v["name"].lower():
-            v["force_ns"] = True
-            st.info("Basketball detected → Forced N-S")
-        else:
-            v["force_ns"] = st.checkbox("Force North-South", v["force_ns"], key=f"ns{i}")
-        if st.button("Delete", key=f"d{i}"):
-            delete_venue(i); st.rerun()
-
-if st.sidebar.button("Add New Venue"):
-    add_venue(); st.rerun()
-
-# ==================== 生成布局 ====================
-def generate_layout():
-    np.random.seed()
-    placed = []
-    for v in st.session_state.custom_venues:
-        if v["count"] == 0: continue
-        for _ in range(v["count"]):
-            for _ in range(5000):
-                x = np.random.uniform(buffer, width - max(v["w"], v["h"]) - buffer)
-                y = np.random.uniform(buffer, height - max(v["w"], v["h"]) - buffer)
-                w, h = (v["h"], v["w"]) if v["force_ns"] else (v["w"], v["h"])
-                if any(x < px + pw + buffer and x + w > px - buffer and
-                       y < py + ph + buffer and y + h > py - buffer
-                       for px,py,pw,ph,_ in placed):
-                    continue
-                placed.append((x, y, w, h, v["name"], v["color"]))
-                break
-    return placed
-
-if st.button("Generate Layout", type="primary"):
-    with st.spinner("Generating..."):
-        st.session_state.placed = generate_layout()
-    st.success("Done!")
-
-# ==================== 显示 + 导出 ====================
-if st.session_state.get("placed"):
-    fig, ax = plt.subplots(figsize=(16,10))
-    ax.set_xlim(0, width); ax.set_ylim(0, height); ax.set_aspect('equal')
-    
-    if uploaded_img:
-        img = Image.open(uploaded_img)
-        ax.imshow(img, extent=(0,width,0,height), alpha=0.35)
-    
-    # 绘制边界
-    if len(boundary_polygon) > 5:
-        poly = plt.Polygon([(p[0], p[1]) for p in boundary_polygon], closed=True, fill=False, ec="red", lw=4)
-        ax.add_patch(poly)
-    else:
-        ax.add_patch(plt.Rectangle((0,0), width, height, fill=False, ec="red", lw=4))
-    
-    for x,y,w,h,name,color in st.session_state.placed:
-        ax.add_patch(patches.Rectangle((x,y), w, h, fc=color, alpha=0.8, ec="white", lw=2))
-        ax.text(x+w/2, y+h/2, f"{name}\n{w:.0f}×{h:.0f}", ha='center', va='center', color="white", fontsize=9, fontweight="bold")
-    
-    st.pyplot(fig)
-    
-    c1, c2 = st.columns(2)
-    buf = io.BytesIO(); fig.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0)
-    c1.download_button("Download PNG", buf, "layout.png", "image/png")
-    
-    # DXF 导出（使用导出单位）
-    doc = ezdxf.new('R2018')
-    msp = doc.modelspace()
-    scale = export_factor
-    
-    # 边界
-    if len(boundary_polygon) > 5:
-        pts = [(p[0]*scale, p[1]*scale) for p in boundary_polygon]
-        msp.add_lwpolyline(pts)
-    else:
-        msp.add_lwpolyline([(0,0),(width*scale,0),(width*scale,height*scale),(0,height*scale),(0,0)])
-    
-    # 场地
-    for x,y,w,h,name,_ in st.session_state.placed:
-        pts = [(x*scale,y*scale), ((x+w)*scale,y*scale), ((x+w)*scale,(y+h)*scale), (x*scale,(y+h)*scale), (x*scale,y*scale)]
-        msp.add_lwpolyline(pts)
-        msp.add_text(name, dxfattribs={"height": max(3*scale, 1)}).set_placement(((x+w/2)*scale, (y+h/2)*scale), align=TextEntityAlignment.CENTER)
-    
-    dxf_buf = io.BytesIO(); doc.saveas(dxf_buf); dxf_buf.seek(0)
-    c2.download_button(f"Export DXF ({export_unit.split()[0]})", dxf_buf, "layout_final.dxf", "application/dxf")
-else:
-    st.info("请上传DXF或设置场地 → 点击 Generate Layout 开始")
-
-st.caption("Ultimate Version 3.5 • DXF Import & Export support Meter/Feet/Inch • Fully Customizable")
+        st.error(f"DXF 读取失败（常见于文件损坏或加密）：{e}")
+    finally:
+        # 清理临时文件
+        import os
+        if 'tmp_path' in locals():
+            try: os.unlink(tmp_path)
+            except: pass
