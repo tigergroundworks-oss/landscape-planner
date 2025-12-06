@@ -1,4 +1,4 @@
-# app.py —— Ultimate Venue Planner v7.0（Architectural Feet 完美支持版 - 修复 KeyError）
+# app.py —— Ultimate Venue Planner v7.0（Architectural Feet 完美支持版 - 修复不出界 + 随机旋转滑块 + 最大化空间利用）
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -37,6 +37,9 @@ col1, col2 = st.sidebar.columns(2)
 width_ft  = col1.number_input("E-W width (ft)", value=1000.0)
 height_ft = col2.number_input("N-S length (ft)", value=800.0)
 buffer_ft = st.sidebar.slider("Buffer between venues (ft)", 10, 150, 40)
+
+# 新增: 随机旋转滑块（0-360度）
+rotation_range = st.sidebar.slider("Random Rotation Range (degrees, for non-forced venues)", 0, 360, 90)
 
 uploaded_dxf = st.sidebar.file_uploader("Upload Site DXF (polygon + background)", type=["dxf"])
 uploaded_img = st.sidebar.file_uploader("Extra image overlay (optional)", type=["png","jpg","jpeg"])
@@ -86,7 +89,7 @@ if uploaded_dxf:
             except: pass
 
 # ==================== 自定义场地（Feet）===================
-if "custom_venues" not in st.session_state:
+if 'custom_venues' not in st.session_state:
     st.session_state.custom_venues = [
         {"name": "Basketball Court", "w": 94,  "h": 50,  "count": 3, "color": "#1f77b4", "force_ns": True},
         {"name": "Soccer Field",     "w": 345, "h": 223, "count": 0, "color": "#2ca02c", "force_ns": False},
@@ -123,7 +126,30 @@ if st.sidebar.button("Add New Venue"):
     add_venue()
     st.rerun()
 
-# ==================== 生成布局 ====================
+# ==================== 点是否在多边形内（用于不出界检查） ====================
+def point_in_polygon(point, polygon):
+    x, y = point
+    n = len(polygon)
+    inside = False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+# ==================== 矩形是否在多边形内 ====================
+def rect_in_polygon(x, y, w, h, polygon):
+    corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    return all(point_in_polygon(corner, polygon) for corner in corners)
+
+# ==================== 生成布局（不出界 + 随机旋转 + 最大化利用） ====================
 def generate_layout():
     np.random.seed()
     placed = []
@@ -131,21 +157,43 @@ def generate_layout():
         if v["count"] == 0: continue
         for _ in range(v["count"]):
             success = False
-            for _ in range(5000):
-                x = np.random.uniform(buffer_ft, actual_w - max(v["w"], v["h"]) - buffer_ft)
-                y = np.random.uniform(buffer_ft, actual_h - max(v["w"], v["h"]) - buffer_ft)
-                w, h = (v["h"], v["w"]) if v["force_ns"] else (v["w"], v["h"])
-                overlap = any(
-                    x < px + pw + buffer_ft and x + w > px - buffer_ft and
-                    y < py + ph + buffer_ft and y + h > py - buffer_ft
-                    for px,py,pw,ph,_,_ in placed
-                ) if placed else False
+            for _ in range(10000):  # 增加尝试次数 → 最大化利用
+                x = np.random.uniform(0, actual_w - max(v["w"], v["h"]))
+                y = np.random.uniform(0, actual_h - max(v["w"], v["h"]))
+                angle = 0 if v["force_ns"] else np.random.uniform(0, rotation_range)
+                w, h = v["w"], v["h"]  # 旋转后宽高不变，但检查边界时用旋转矩形
+                
+                # 旋转后角点计算（确保不出界）
+                # 简化：假设矩形未旋转时检查，如果允许旋转，用库计算旋转矩形角点
+                # 为最大化，利用 bounding box 检查
+                # 但为精确，计算旋转后4角点是否在多边形内
+                if angle != 0:
+                    # 计算旋转后角点（中心旋转）
+                    center_x, center_y = x + w/2, y + h/2
+                    theta = np.radians(angle)
+                    cos, sin = np.cos(theta), np.sin(theta)
+                    corners = [
+                        (center_x - w/2 * cos - h/2 * sin, center_y - w/2 * sin + h/2 * cos),
+                        (center_x + w/2 * cos - h/2 * sin, center_y + w/2 * sin + h/2 * cos),
+                        (center_x + w/2 * cos + h/2 * sin, center_y + w/2 * sin - h/2 * cos),
+                        (center_x - w/2 * cos + h/2 * sin, center_y - w/2 * sin - h/2 * cos),
+                    ]
+                    if not all(point_in_polygon(corner, boundary_polygon) for corner in corners):
+                        continue
+                else:
+                    if not rect_in_polygon(x, y, w, h, boundary_polygon):
+                        continue
+
+                # 重叠检查
+                overlap = any(x < px + pw + buffer_ft and x + w > px - buffer_ft and
+                              y < py + ph + buffer_ft and y + h > py - buffer_ft
+                              for px,py,pw,ph,_,_ in placed) if placed else False
                 if not overlap:
-                    placed.append((x, y, w, h, v["name"], v["color"]))
+                    placed.append((x, y, w, h, v["name"], v["color"], angle))  # 添加 angle
                     success = True
                     break
             if not success:
-                st.toast(f"Could not place one {v['name']}")
+                st.toast(f"Could not place one {v['name']} (site too small?)")
     return placed
 
 if st.button("Generate New Layout", type="primary", use_container_width=True):
@@ -160,7 +208,7 @@ if st.session_state.get("placed"):
     ax.set_ylim(0, actual_h)
     ax.set_aspect('equal')
 
-    # 1. DXF 背景（半透明灰色）
+    # 1. DXF 背景
     if dxf_entities:
         for e in dxf_entities:
             try:
@@ -183,11 +231,15 @@ if st.session_state.get("placed"):
     if boundary_polygon:
         ax.add_patch(plt.Polygon(boundary_polygon, closed=True, fill=False, ec="red", lw=5, alpha=0.9))
 
-    # 3. 新场地
-    for x,y,w,h,name,color in st.session_state.placed:
-        ax.add_patch(patches.Rectangle((x,y), w, h, fc=color, alpha=0.85, ec="white", lw=3))
-        ax.text(x+w/2, y+h/2, f"{name}\n{w:.0f}×{h:.0f} ft",
-                ha='center', va='center', color="white", fontsize=11, fontweight="bold")
+    # 3. 新场地（支持随机旋转）
+    for x,y,w,h,name,color,angle in st.session_state.placed:
+        rect = patches.Rectangle((x, y), w, h, linewidth=3, edgecolor='white', facecolor=color, alpha=0.85)
+        transform = matplotlib.transforms.Affine2D().rotate_deg_around(x + w/2, y + h/2, angle) + ax.transData
+        rect.set_transform(transform)
+        ax.add_patch(rect)
+        # 文本旋转
+        ax.text(x + w/2, y + h/2, f"{name}\n{w:.0f}×{h:.0f} ft",
+                ha='center', va='center', color="white", fontsize=11, fontweight="bold", rotation=angle)
 
     # 4. 额外图片叠加
     if uploaded_img:
@@ -210,10 +262,23 @@ if st.session_state.get("placed"):
     scale = export_factor
     pts = boundary_polygon if len(boundary_polygon)>5 else [(0,0),(actual_w,0),(actual_w,actual_h),(0,actual_h),(0,0)]
     msp.add_lwpolyline([(p[0]*scale, p[1]*scale) for p in pts])
-    for x,y,w,h,name,_ in st.session_state.placed:
-        rect = [(x*scale,y*scale), ((x+w)*scale,y*scale), ((x+w)*scale,(y+h)*scale), (x*scale,(y+h)*scale), (x*scale,y*scale)]
-        msp.add_lwpolyline(rect)
-        msp.add_text(name, dxfattribs={"height": max(15*scale,5)}).set_placement(((x+w/2)*scale, (y+h/2)*scale), align=TextEntityAlignment.CENTER)
+    for x,y,w,h,name,color,angle in st.session_state.placed:
+        # 旋转矩形导出为 LWPOLYLINE
+        center_x, center_y = x + w/2, y + h/2
+        theta = np.radians(angle)
+        cos, sin = np.cos(theta), np.sin(theta)
+        corners = [
+            (center_x - w/2 * cos - h/2 * sin, center_y - w/2 * sin + h/2 * cos),
+            (center_x + w/2 * cos - h/2 * sin, center_y + w/2 * sin + h/2 * cos),
+            (center_x + w/2 * cos + h/2 * sin, center_y + w/2 * sin - h/2 * cos),
+            (center_x - w/2 * cos + h/2 * sin, center_y - w/2 * sin - h/2 * cos),
+            (center_x - w/2 * cos - h/2 * sin, center_y - w/2 * sin + h/2 * cos)  # 闭合
+        ]
+        msp.add_lwpolyline([(p[0]*scale, p[1]*scale) for p in corners])
+        # 文本（旋转）
+        text = msp.add_text(name, dxfattribs={"height": max(15*scale,5)})
+        text.set_placement((center_x*scale, center_y*scale), align=TextEntityAlignment.CENTER)
+        text.dxf.rotation = angle
     dxf_buf = io.BytesIO(); doc.saveas(dxf_buf); dxf_buf.seek(0)
     c2.download_button(f"Export DXF ({export_unit.split()[0]})", dxf_buf, "final_layout.dxf", "application/dxf")
 else:
