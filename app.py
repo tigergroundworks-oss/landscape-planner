@@ -1,4 +1,4 @@
-# app.py —— 终极英制版 4.0（全站使用 Feet，DXF进出自由切换单位）
+# app.py —— 终极英制版 4.0 修复版（自动初始化 + 按钮触发生成 + 空列表安全）
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -85,7 +85,7 @@ if "custom_venues" not in st.session_state:
 def add_venue():
     st.session_state.custom_venues.append({
         "name": "New Space", "w": 100, "h": 80, "count": 1,
-        "color": "#"+"".join(np.random.choice(list("0123456789ABCDEF"), 6)),
+        "color": "#"+''.join(np.random.choice(list('0123456789ABCDEF')) for _ in range(6)),
         "force_ns": False
     })
 
@@ -114,22 +114,28 @@ if st.sidebar.button("Add New Venue"):
 # ==================== 生成布局 ====================
 def generate_layout():
     np.random.seed()
-    placed = []
+    placed = []  # 始终从空列表开始
     for v in st.session_state.custom_venues:
         if v["count"] == 0: continue
         for _ in range(v["count"]):
-            for _ in range(5000):
+            for attempt in range(5000):
                 x = np.random.uniform(buffer_ft, actual_width - max(v["w"], v["h"]) - buffer_ft)
                 y = np.random.uniform(buffer_ft, actual_height - max(v["w"], v["h"]) - buffer_ft)
                 w, h = (v["h"], v["w"]) if v["force_ns"] else (v["w"], v["h"])
-                if any(x < px + pw + buffer_ft and x + w > px - buffer_ft and
-                       y < py + ph + buffer_ft and y + h > py - buffer_ft
-                       for px,py,pw,ph,_ in placed):
-                    continue
-                placed.append((x, y, w, h, v["name"], v["color"]))
-                break
+                # 安全检查：如果 placed 为空，overlap=False
+                overlap = False
+                if placed:  # 只在非空时检查
+                    overlap = any(x < px + pw + buffer_ft and x + w > px - buffer_ft and
+                                  y < py + ph + buffer_ft and y + h > py - buffer_ft
+                                  for px,py,pw,ph,_ in placed)
+                if not overlap:
+                    placed.append((x, y, w, h, v["name"], v["color"]))
+                    break
+            else:
+                st.warning(f"Could not place {v['name']} (site too small?)")
     return placed
 
+# ==================== 生成按钮（修复：仅在点击时执行） ====================
 if st.button("Generate New Layout", type="primary"):
     with st.spinner("Generating layout in feet..."):
         st.session_state.placed = generate_layout()
@@ -137,6 +143,7 @@ if st.button("Generate New Layout", type="primary"):
 
 # ==================== 显示结果 ====================
 if st.session_state.get("placed"):
+    placed = st.session_state.placed
     fig, ax = plt.subplots(figsize=(16,10))
     ax.set_xlim(0, actual_width)
     ax.set_ylim(0, actual_height)
@@ -156,7 +163,7 @@ if st.session_state.get("placed"):
         ax.add_patch(plt.Rectangle((0,0), actual_width, actual_height, fill=False, ec="red", lw=4))
 
     # 场地
-    for x,y,w,h,name,color in st.session_state.placed:
+    for x,y,w,h,name,color in placed:
         ax.add_patch(patches.Rectangle((x,y), w, h, fc=color, alpha=0.8, ec="white", lw=2))
         ax.text(x+w/2, y+h/2, f"{name}\n{w:.0f}×{h:.0f} ft", ha='center', va='center',
                 color="white", fontsize=10, fontweight="bold")
@@ -184,7 +191,7 @@ if st.session_state.get("placed"):
     else:
         msp.add_lwpolyline([(0,0),(actual_width*scale,0),(actual_width*scale,actual_height*scale),(0,actual_height*scale),(0,0)])
 
-    for x,y,w,h,name,_ in st.session_state.placed:
+    for x,y,w,h,name,_ in placed:
         pts = [(x*scale,y*scale), ((x+w)*scale,y*scale), ((x+w)*scale,(y+h)*scale), (x*scale,(y+h)*scale), (x*scale,y*scale)]
         msp.add_lwpolyline(pts)
         msp.add_text(name, dxfattribs={"height": max(10*scale, 5)}).set_placement(((x+w/2)*scale, (y+h/2)*scale), align=TextEntityAlignment.CENTER)
@@ -194,6 +201,6 @@ if st.session_state.get("placed"):
     dxf_buf.seek(0)
     c2.download_button(f"Export DXF ({export_unit})", dxf_buf, "layout_imperial.dxf", "application/dxf")
 else:
-    st.info("Upload DXF or set site size → Click 'Generate New Layout'")
+    st.info("Configure custom venues in the sidebar → Click 'Generate New Layout' to start")
 
-st.caption("Ultimate Imperial Edition v4.0 • All in Feet • Full DXF Unit Control • Made with Grok")
+st.caption("Ultimate Imperial Edition v4.0 (Fixed) • All in Feet • Full DXF Unit Control • Made with Grok")
