@@ -3,3 +3,4 @@ matplotlib
 numpy
 Pillow
 ezdxf
+streamlit-js-eval
