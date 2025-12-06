@@ -1,4 +1,4 @@
-# app.py —— 场地智能布局终极版 2.0（中英文 + 任意形状 + 拖拽 + 多方案）
+# app.py —— 终极版 3.5（DXF导入+导出 全部支持 Feet/Inch/Meter）
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,131 +6,180 @@ import matplotlib.patches as patches
 from PIL import Image
 import io
 import ezdxf
-import json
-import base64
-from streamlit_js_eval import streamlit_js_eval
+from ezdxf.enums import TextEntityAlignment
 
-# ==================== 多语言 ====================
-lang = st.sidebar.selectbox("Language / 语言", ["English", "中文"])
-_ = lambda en, cn: en if lang == "English" else cn
+st.set_page_config(page_title="Ultimate Venue Planner 3.5", layout="wide")
+st.title("Ultimate Venue Layout Planner v3.5")
+st.markdown("**DXF 导入支持 Feet/Inch/Meter • 导出也支持三种单位 • 完全自定义场地**")
 
-st.set_page_config(page_title=_("Sports Venue Planner Pro", "场地智能布局 Pro"), layout="wide")
-st.title(_("Sports Venue Layout Planner Pro v2.0", "场地智能布局终极版 2.0"))
+# ==================== 侧边栏：DXF 导入单位 ====================
+st.sidebar.header("DXF Import Unit (when uploading boundary)")
+import_unit = st.sidebar.selectbox(
+    "DXF 原始单位 / Original DXF Unit",
+    options=["Meter (m)", "Feet (ft)", "Inch (in)"],
+    index=0,
+    help="选择你上传的DXF文件使用的单位，程序会自动转换为米"
+)
 
-# ==================== 场地类型库 ====================
-VENUES = {
-    "basketball":  {"name": _("Basketball", "篮球场"),     "size": (28,15), "color": "#1f77b4", "rotate": False},
-    "soccer":      {"name": _("Soccer", "足球场"),       "size": (105,68), "color": "#2ca02c", "rotate": True},
-    "badminton":   {"name": _("Badminton", "羽毛球场"),   "size": (13.4,6.1), "color": "#d62728", "rotate": True},
-    "tennis":      {"name": _("Tennis", "网球场"),       "size": (23.77,10.97), "color": "#ff7f0e", "rotate": True},
-    "volleyball":  {"name": _("Volleyball", "排球场"),   "size": (18,9), "color": "#9467bd", "rotate": True},
-    "playground":  {"name": _("Playground", "儿童乐园"), "size": (40,30), "color": "#e377c2", "rotate": True},
-    "parking":     {"name": _("Parking", "停车场"),      "size": (60,40), "color": "#8c564b", "rotate": True},
-    "running":     {"name": _("400m Track", "400m跑道"), "size": (180,100), "color": "#bcbd22", "rotate": False},
-}
+# 导入单位 → 米的换算系数
+import_factor = {
+    "Meter (m)": 1.0,
+    "Feet (ft)": 0.3048,      # 1 ft = 0.3048 m
+    "Inch (in)": 0.0254       # 1 in = 0.0254 m
+}[import_unit]
 
-# ==================== 侧边栏 ====================
-st.sidebar.header(_("Site Settings", "场地设置"))
-boundary_file = st.sidebar.file_uploader(_("Upload boundary DXF/PNG/JPG", "上传边界 DXF 或底图"), 
-                                        type=["dxf","png","jpg","jpeg"])
-buffer = st.sidebar.slider(_("Buffer distance (m)", "场地间距 (米)"), 3, 30, 10)
+# ==================== 侧边栏：DXF 导出单位 ====================
+st.sidebar.header("DXF Export Unit")
+export_unit = st.sidebar.selectbox(
+    "导出DXF单位 / Export Unit",
+    options=["Meter (m)", "Feet (ft)", "Inch (in)"],
+    index=0
+)
+export_factor = {
+    "Meter (m)": 1.0,
+    "Feet (ft)": 3.28084,
+    "Inch (in)": 39.3701
+}[export_unit]
 
-st.sidebar.header(_("Venue Count", "场地数量"))
-counts = {}
-for key, v in VENUES.items():
-    counts[key] = st.sidebar.number_input(v["name"], 0, 50, 0 if key != "basketball" else 3, key=key)
+# ==================== 场地尺寸 & 底图 ====================
+default_w, default_h = 300.0, 200.0
+width  = st.sidebar.number_input("场地宽度 E-W (m)", value=default_w)
+height = st.sidebar.number_input("场地长度 N-S (m)", value=default_h)
+buffer = st.sidebar.slider("场地间距 Buffer (m)", 3, 50, 10)
 
-# 多方案数量
-n_schemes = st.sidebar.slider(_("Number of schemes", "生成方案数量"), 1, 6, 4)
+uploaded_img = st.sidebar.file_uploader("上传底图 Base Map", type=["png","jpg","jpeg"])
+uploaded_dxf = st.sidebar.file_uploader("上传边界DXF (可选) / Upload Boundary DXF", type=["dxf"])
 
-# ==================== 边界处理 ====================
-boundary_polygon = [(0,0), (300,0), (300,200), (0,200)]  # 默认
+# ==================== 读取DXF边界（支持单位换算） ====================
+boundary_polygon = [(0,0), (width,0), (width,height), (0,height), (0,0)]
 
-if boundary_file:
-    if boundary_file.name.endswith(".dxf"):
-        doc = ezdxf.readfile(boundary_file)
+if uploaded_dxf:
+    try:
+        doc = ezdxf.readfile(uploaded_dxf)
         msp = doc.modelspace()
-        for e in msp.query("LWPOLYLINE"):
-            boundary_polygon = [(p[0], p[1]) for p in e.get_points("xy")]
-            break
-    else:
-        img = Image.open(boundary_file)
-        st.session_state.base_img = img
+        points = []
+        for e in msp.query("LWPOLYLINE CIRCLE ARC LINE"):
+            if e.dxftype() == "LWPOLYLINE":
+                pts = e.get_points("xy")
+                points = [(p[0]*import_factor, p[1]*import_factor) for p in pts]
+                break
+        if points:
+            boundary_polygon = points + [points[0]]
+            # 自动更新场地尺寸为DXF实际范围
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            width = max(xs) - min(xs)
+            height = max(ys) - min(ys)
+            st.success(f"DXF导入成功！场地尺寸自动设为 {width:.1f}×{height:.1f} m")
+        else:
+            st.warning("未识别到有效边界，使用矩形场地")
+    except Exception as e:
+        st.error(f"DXF读取失败: {e}")
 
-# ==================== 生成布局函数（智能版）===================
-def generate_smart_layout(seed=None):
-    if seed: np.random.seed(seed)
+# ==================== 自定义场地管理（同上一版） ====================
+if 'custom_venues' not in st.session_state:
+    st.session_state.custom_venues = [
+        {"name": "Basketball Court", "w": 28, "h": 15, "count": 3, "color": "#1f77b4", "force_ns": True},
+        {"name": "Soccer Field",     "w": 105,"h": 68, "count": 0, "color": "#2ca02c", "force_ns": False},
+        {"name": "Badminton",        "w": 13.4,"h": 6.1,"count": 12,"color": "#d62728", "force_ns": False},
+    ]
+
+def add_venue(): 
+    st.session_state.custom_venues.append({"name":"New Space","w":30,"h":20,"count":1,"color":"#ff7f0e","force_ns":False})
+def delete_venue(i): 
+    st.session_state.custom_venues.pop(i)
+
+st.sidebar.header("Custom Venues")
+for i, v in enumerate(st.session_state.custom_venues):
+    with st.sidebar.expander(f"{v['name']} ({v['w']}×{v['h']}m) ×{v['count']}", expanded=True):
+        v["name"] = st.text_input("Name", v["name"], key=f"n{i}")
+        c1,c2 = st.columns(2)
+        v["w"] = c1.number_input("Width(m)", value=float(v["w"]), key=f"w{i}")
+        v["h"] = c2.number_input("Height(m)", value=float(v["h"]), key=f"h{i}")
+        v["count"] = st.number_input("Count", 0, 50, v["count"], key=f"c{i}")
+        v["color"] = st.color_picker("Color", v["color"], key=f"col{i}")
+        if "basketball" in v["name"].lower():
+            v["force_ns"] = True
+            st.info("Basketball detected → Forced N-S")
+        else:
+            v["force_ns"] = st.checkbox("Force North-South", v["force_ns"], key=f"ns{i}")
+        if st.button("Delete", key=f"d{i}"):
+            delete_venue(i); st.rerun()
+
+if st.sidebar.button("Add New Venue"):
+    add_venue(); st.rerun()
+
+# ==================== 生成布局 ====================
+def generate_layout():
+    np.random.seed()
     placed = []
-    min_x = min(x for x,y in boundary_polygon)
-    max_x = max(x for x,y in boundary_polygon)
-    min_y = min(y for x,y in boundary_polygon)
-    max_y = max(y for x,y in boundary_polygon)
-    
-    order = ["soccer","running","parking","playground","tennis","volleyball","basketball","badminton"]
-    for typ in order:
-        cnt = counts[typ]
-        if cnt == 0: continue
-        w0, h0 = VENUES[typ]["size"]
-        for _ in range(cnt):
+    for v in st.session_state.custom_venues:
+        if v["count"] == 0: continue
+        for _ in range(v["count"]):
             for _ in range(5000):
-                angle = 90 if typ == "basketball" else np.random.choice([0, 90])
-                w, h = (h0, w0) if angle == 90 else (w0, h0)
-                x = np.random.uniform(min_x + buffer, max_x - w - buffer)
-                y = np.random.uniform(min_y + buffer, max_y - h - buffer)
-                
-                # 简单点在多边形内检查（升级版可换Shapely）
-                if all((x+w/2 > px + pw/2) == (y+h/2 > py + ph/2) for px,py,pw,ph,_ in placed): continue
-                    
-                overlap = any(x < px + pw + buffer and x + w > px - buffer and
-                              y < py + ph + buffer and y + h > py - buffer
-                              for px,py,pw,ph,_ in placed)
-                if not overlap:
-                    placed.append((x, y, w, h, typ, angle))
-                    break
+                x = np.random.uniform(buffer, width - max(v["w"], v["h"]) - buffer)
+                y = np.random.uniform(buffer, height - max(v["w"], v["h"]) - buffer)
+                w, h = (v["h"], v["w"]) if v["force_ns"] else (v["w"], v["h"])
+                if any(x < px + pw + buffer and x + w > px - buffer and
+                       y < py + ph + buffer and y + h > py - buffer
+                       for px,py,pw,ph,_ in placed):
+                    continue
+                placed.append((x, y, w, h, v["name"], v["color"]))
+                break
     return placed
 
-# ==================== 生成多方案 ====================
-if st.button(_("Generate Schemes", "生成多方案"), type="primary"):
-    with st.spinner():
-        schemes = []
-        for i in range(n_schemes):
-            placed = generate_smart_layout(seed=42+i*100)
-            schemes.append(placed)
-        st.session_state.schemes = schemes
-        st.success(_("Generated!", "生成完成！"))
+if st.button("Generate Layout", type="primary"):
+    with st.spinner("Generating..."):
+        st.session_state.placed = generate_layout()
+    st.success("Done!")
 
-# ==================== 显示多方案 ====================
-if st.session_state.get("schemes"):
-    cols = st.columns(n_schemes)
-    for i, placed in enumerate(st.session_state.schemes):
-        with cols[i]:
-            st.subheader(f"{_('Scheme', '方案')} {i+1}")
-            fig, ax = plt.subplots(figsize=(8,6))
-            # 底图
-            if "base_img" in st.session_state:
-                img = st.session_state.base_img
-                ax.imshow(img, extent=(0, img.width, 0, img.height), alpha=0.3)
-            # 边界 + 场地
-            poly = plt.Polygon(boundary_polygon, closed=True, fill=False, ec="red", lw=2)
-            ax.add_patch(poly)
-            for x,y,w,h,typ,rot in placed:
-                rect = patches.Rectangle((x,y),w,h, angle=rot, facecolor=VENUES[typ]["color"], alpha=0.8, ec="white")
-                ax.add_patch(rect)
-                ax.text(x+w/2, y+h/2, VENUES[typ]["name"].split()[-1], color="white", weight="bold", ha="center")
-            ax.set_aspect('equal')
-            ax.axis("off")
-            st.pyplot(fig)
+# ==================== 显示 + 导出 ====================
+if st.session_state.get("placed"):
+    fig, ax = plt.subplots(figsize=(16,10))
+    ax.set_xlim(0, width); ax.set_ylim(0, height); ax.set_aspect('equal')
+    
+    if uploaded_img:
+        img = Image.open(uploaded_img)
+        ax.imshow(img, extent=(0,width,0,height), alpha=0.35)
+    
+    # 绘制边界
+    if len(boundary_polygon) > 5:
+        poly = plt.Polygon([(p[0], p[1]) for p in boundary_polygon], closed=True, fill=False, ec="red", lw=4)
+        ax.add_patch(poly)
+    else:
+        ax.add_patch(plt.Rectangle((0,0), width, height, fill=False, ec="red", lw=4))
+    
+    for x,y,w,h,name,color in st.session_state.placed:
+        ax.add_patch(patches.Rectangle((x,y), w, h, fc=color, alpha=0.8, ec="white", lw=2))
+        ax.text(x+w/2, y+h/2, f"{name}\n{w:.0f}×{h:.0f}", ha='center', va='center', color="white", fontsize=9, fontweight="bold")
+    
+    st.pyplot(fig)
+    
+    c1, c2 = st.columns(2)
+    buf = io.BytesIO(); fig.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0)
+    c1.download_button("Download PNG", buf, "layout.png", "image/png")
+    
+    # DXF 导出（使用导出单位）
+    doc = ezdxf.new('R2018')
+    msp = doc.modelspace()
+    scale = export_factor
+    
+    # 边界
+    if len(boundary_polygon) > 5:
+        pts = [(p[0]*scale, p[1]*scale) for p in boundary_polygon]
+        msp.add_lwpolyline(pts)
+    else:
+        msp.add_lwpolyline([(0,0),(width*scale,0),(width*scale,height*scale),(0,height*scale),(0,0)])
+    
+    # 场地
+    for x,y,w,h,name,_ in st.session_state.placed:
+        pts = [(x*scale,y*scale), ((x+w)*scale,y*scale), ((x+w)*scale,(y+h)*scale), (x*scale,(y+h)*scale), (x*scale,y*scale)]
+        msp.add_lwpolyline(pts)
+        msp.add_text(name, dxfattribs={"height": max(3*scale, 1)}).set_placement(((x+w/2)*scale, (y+h/2)*scale), align=TextEntityAlignment.CENTER)
+    
+    dxf_buf = io.BytesIO(); doc.saveas(dxf_buf); dxf_buf.seek(0)
+    c2.download_button(f"Export DXF ({export_unit.split()[0]})", dxf_buf, "layout_final.dxf", "application/dxf")
+else:
+    st.info("请上传DXF或设置场地 → 点击 Generate Layout 开始")
 
-    # 导出所有方案
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Export All as PDF (A1)"):
-            # 实际项目可用 reportlab，这里先提示
-            st.success("PDF export ready for Pro version!")
-    with col2:
-        if st.button("Export Selected as DXF"):
-            st.download_button("Download DXF", data="Coming soon", file_name="layout.dxf")
-
-st.markdown("---")
-st.markdown(_("**Pro Version Features Coming Next Week:** Drag-to-adjust • Save Project • Share Link • PDF with Legend", 
-      "**专业版下周上线：** 拖拽调整 • 保存项目 • 分享链接 • 带图例PDF"))
+st.caption("Ultimate Version 3.5 • DXF Import & Export support Meter/Feet/Inch • Fully Customizable")
