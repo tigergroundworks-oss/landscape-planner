@@ -1,4 +1,4 @@
-# app.py —— Ultimate Venue Planner v13.0（真实拖拽 + 旋转 + 缩放 + 永不报错）
+# app.py —— Ultimate Venue Planner v14.0（真实拖拽 + 旋转 + 缩放 + 永不报错）
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,9 +10,8 @@ import ezdxf
 import tempfile
 import os
 from ezdxf.enums import TextEntityAlignment
-from streamlit_drawable_canvas import st_canvas
 
-st.set_page_config(page_title="Venue Planner v13.0", layout="wide", page_icon="Stadium")
+st.set_page_config(page_title="Venue Planner v14.0", layout="wide", page_icon="Stadium")
 
 # ==================== UI 美化 ====================
 st.markdown("""
@@ -23,13 +22,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="big-title">Venue Layout Planner v13.0</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="big-title">Venue Layout Planner v14.0</h1>', unsafe_allow_html=True)
 st.markdown("**All in Feet • Drag & Rotate & Resize • Full DXF background • Professional**")
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("DXF Import Unit")
-    import_unit = st.selectbox("Original unit", ["Inch ← U.S. Architectural", "Feet", "Meter"], index=0)
+    import_unit = st.selectbox("Original unit", ["Inch U.S. Architectural", "Feet", "Meter"], index=0)
     import_factor = {"Inch": 1/12, "Feet": 1.0, "Meter": 3.28084}[import_unit.split()[0]]
 
     st.header("DXF Export Unit")
@@ -122,6 +121,25 @@ if uploaded_dxf:
             try: os.unlink(tmp_path)
             except: pass
 
+# ==================== 点在多边形内 ====================
+def point_in_polygon(x, y, poly):
+    if not poly or len(poly) < 3:
+        return True
+    n = len(poly)
+    inside = False
+    p1x, p1y = poly[0]
+    for i in range(1, n + 1):
+        p2x, p2y = poly[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
 # ==================== 生成布局 ====================
 def generate_layout():
     np.random.seed()
@@ -169,91 +187,68 @@ def generate_layout():
                 st.toast(f"Could not place one {v['name']}")
     return placed
 
-# ==================== 点在多边形内 ====================
-def point_in_polygon(x, y, poly):
-    if not poly or len(poly) < 3:
-        return True
-    n = len(poly)
-    inside = False
-    p1x, p1y = poly[0]
-    for i in range(1, n + 1):
-        p2x, p2y = poly[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xinters:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
-    return inside
-
 # ==================== 生成按钮 ====================
 if st.button("Generate New Layout", type="primary", use_container_width=True):
     with st.spinner("Generating optimal layout..."):
         st.session_state.placed = generate_layout()
     st.success(f"Success! {len(st.session_state.placed)} venues placed")
-    st.session_state.canvas_objects = None  # 重置画布
+    st.session_state.canvas_key = str(np.random.rand())  # 重置画布
 
-# ==================== 交互式拖拽画布（超丝滑） ====================
+# ==================== 交互式拖拽（使用 st_canvas 简化版） ====================
 if st.session_state.get("placed"):
     st.markdown('<div class="draggable-tip">Drag to move • Hold Shift + Drag to rotate • Resize corners • Font rotates perfectly!</div>', unsafe_allow_html=True)
 
-    # 初始化画布对象
-    if "canvas_objects" not in st.session_state or st.session_state.canvas_objects is None:
-        objects = []
-        for i, (x, y, w, h, name, color, angle) in enumerate(st.session_state.placed):
-            obj = {
-                "type": "rect",
-                "left": x,
-                "top": y,
-                "width": w,
-                "height": h,
-                "angle": angle,
-                "fill": color,
-                "stroke": "white",
-                "strokeWidth": 3,
-                "selectable": True,
-                "hasRotatingPoint": True,
-                "name": name,
-                "text": f"{name}\n{w:.0f}×{h:.0f} ft"
-            }
-            objects.append(obj)
-        st.session_state.canvas_objects = objects
+    # 创建可拖拽对象
+    objects = []
+    for i, (x, y, w, h, name, color, angle) in enumerate(st.session_state.placed):
+        obj = {
+            "type": "rect",
+            "left": x,
+            "top": y,
+            "width": w,
+            "height": h,
+            "angle": angle,
+            "fill": color,
+            "stroke": "white",
+            "strokeWidth": 3,
+            "selectable": True,
+            "hasRotatingPoint": True,
+            "hasControls": True,
+            "lockUniScaling": False,
+        }
+        objects.append(obj)
 
-    # 画布
     canvas_result = st_canvas(
-        fill_color="rgba(255, 255, 255, 0.3)",
-        stroke_width=3,
-        stroke_color="white",
+        fill_color="rgba(0,0,0,0)",
+        stroke_width=0,
+        stroke_color="",
         background_color="#00000000",
         background_image=Image.open(uploaded_img) if uploaded_img else None,
         update_streamlit=True,
         height=int(actual_h),
         width=int(actual_w),
         drawing_mode="transform",
-        initial_objects=st.session_state.canvas_objects,
-        key="canvas",
+        initial_objects=objects,
+        key=f"canvas_{st.session_state.get('canvas_key', '0')}",
     )
 
-    # 实时更新位置
     if canvas_result.json_data is not None:
-        objects = canvas_result.json_data["objects"]
-        if len(objects) == len(st.session_state.placed):
+        objs = canvas_result.json_data["objects"]
+        if len(objs) == len(st.session_state.placed):
             new_placed = []
-            for obj in objects:
+            for i, obj in enumerate(objs):
                 x = obj["left"]
                 y = obj["top"]
                 w = obj["width"]
                 h = obj["height"]
                 angle = obj.get("angle", 0)
-                name = obj.get("name", "Venue")
-                color = obj["fill"]
+                name = st.session_state.placed[i][4]
+                color = st.session_state.placed[i][5]
                 new_placed.append((x, y, w, h, name, color, angle))
             st.session_state.placed = new_placed
             st.rerun()
 
-    # 显示最终结果
+    # 最终渲染
     fig, ax = plt.subplots(figsize=(18,11))
     ax.set_xlim(0, actual_w); ax.set_ylim(0, actual_h); ax.set_aspect('equal')
 
@@ -279,7 +274,7 @@ if st.session_state.get("placed"):
 
     st.pyplot(fig)
 
-    # 导出
+    # 导出（同前）
     c1, c2 = st.columns(2)
     buf = io.BytesIO(); fig.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0)
     c1.download_button("Download PNG", buf, "layout.png", "image/png")
@@ -310,4 +305,4 @@ if st.session_state.get("placed"):
 else:
     st.info("Upload DXF → Set venues → Click **Generate New Layout** → Drag to perfection!")
 
-st.caption("v13.0 • Real drag & drop • Rotate with Shift • Resize • Font rotates • Made with Grok")
+st.caption("v14.0 • Real drag & drop • Rotate & Resize • Font rotates • Made with Grok")
